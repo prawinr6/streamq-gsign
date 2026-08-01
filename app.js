@@ -102,41 +102,77 @@ const AuthManager = {
     token: null,
 
     init() {
+        // 1. Check LocalStorage for existing unexpired token
+        const storedToken = localStorage.getItem('yt_access_token');
+        const expiryTime = localStorage.getItem('yt_token_expiry');
+
+        if (storedToken && expiryTime && Date.now() < parseInt(expiryTime)) {
+            this.token = storedToken;
+        } else {
+            // Clean up if expired or invalid
+            this.clearLocalSession();
+        }
+
+        // 2. Initialize Google Token Client
         if (typeof google !== 'undefined' && google.accounts) {
             this.client = google.accounts.oauth2.initTokenClient({
-                client_id: '433396659896-ct041m21obqdseuj1i31h1e5ktjh7n3o.apps.googleusercontent.com',
-                scope: 'https://www.googleapis.com/auth/youtube.readonly',
+                client_id: '433396659896-ct041m21obqdseuj1i31h1e5ktjh7n3o.apps.googleusercontent.com', //[cite: 1]
+                scope: 'https://www.googleapis.com/auth/youtube.readonly', //[cite: 1]
                 callback: (response) => {
                     if (response.error) {
-                        UI.showModalMessage('Authentication failed.', 'error');
+                        UI.showModalMessage('Authentication failed.', 'error'); //[cite: 1]
                         return;
                     }
                     this.token = response.access_token;
-                    UI.updateAuthUI();
-                    UI.loadHome();
+                    
+                    // Google access tokens typically expire in 3600 seconds (1 hour)
+                    const expiresIn = response.expires_in || 3600; 
+                    localStorage.setItem('yt_access_token', this.token);
+                    localStorage.setItem('yt_token_expiry', Date.now() + (expiresIn * 1000));
+
+                    UI.updateAuthUI(); //[cite: 1]
+                    UI.loadHome(); //[cite: 1]
                 }
             });
         }
     },
 
     login() {
-        if (!this.client) this.init();
-        if (this.client) this.client.requestAccessToken();
+        if (!this.client) this.init(); //[cite: 1]
+        // If we already have a valid token in memory/storage, skip requesting a new one
+        if (this.isLoggedIn()) {
+            UI.updateAuthUI();
+            UI.loadHome();
+            return;
+        }
+        if (this.client) this.client.requestAccessToken(); //[cite: 1]
     },
 
     logout() {
         if (this.token && typeof google !== 'undefined' && google.accounts) {
             google.accounts.oauth2.revoke(this.token, () => {
-                console.log('User logged out and token revoked.');
+                console.log('User logged out and token revoked.'); //[cite: 1]
             });
-            this.token = null;
         }
-        UI.updateAuthUI();
-        UI.loadHome();
+        this.clearLocalSession();
+        UI.updateAuthUI(); //[cite: 1]
+        UI.loadHome(); //[cite: 1]
+    },
+
+    clearLocalSession() {
+        this.token = null;
+        localStorage.removeItem('yt_access_token');
+        localStorage.removeItem('yt_token_expiry');
     },
 
     isLoggedIn() {
-        return !!this.token;
+        // Validate token existence and expiry dynamically
+        const expiryTime = localStorage.getItem('yt_token_expiry');
+        if (expiryTime && Date.now() > parseInt(expiryTime)) {
+            this.clearLocalSession();
+            return false;
+        }
+        return !!this.token; //[cite: 1]
     }
 };
 
@@ -583,6 +619,46 @@ if (UI.searchInput) {
         }
     });
 }
+
+// --- FULLSCREEN ORIENTATION HANDLER ---
+function handleFullscreenChange() {
+    const isFullscreen = document.fullscreenElement || 
+                         document.webkitFullscreenElement || 
+                         document.mozFullScreenElement || 
+                         document.msFullscreenElement;
+
+    if (isFullscreen) {
+        // Lock to portrait when entering full screen
+        if (screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock('portrait').catch(err => {
+                console.warn('Orientation lock failed/unsupported:', err);
+            });
+        } else if (screen.lockOrientation) {
+            screen.lockOrientation('portrait');
+        } else if (screen.mozLockOrientation) {
+            screen.mozLockOrientation('portrait');
+        } else if (screen.msLockOrientation) {
+            screen.msLockOrientation('portrait');
+        }
+    } else {
+        // Unlock orientation to revert to device default when exiting
+        if (screen.orientation && screen.orientation.unlock) {
+            screen.orientation.unlock();
+        } else if (screen.unlockOrientation) {
+            screen.unlockOrientation();
+        } else if (screen.mozUnlockOrientation) {
+            screen.mozUnlockOrientation();
+        } else if (screen.msUnlockOrientation) {
+            screen.msUnlockOrientation();
+        }
+    }
+}
+
+// Attach event listeners for all major browsers
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange); // iOS/Safari
+document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+document.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
 // INITIALIZATION
 document.addEventListener('DOMContentLoaded', () => {
