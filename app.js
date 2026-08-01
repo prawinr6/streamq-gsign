@@ -621,42 +621,33 @@ if (UI.searchInput) {
 }
 
 // --- FULLSCREEN ORIENTATION HANDLER ---
-function handleFullscreenChange() {
+const handleFullscreenChange = async () => {
     const isFullscreen = document.fullscreenElement || 
                          document.webkitFullscreenElement || 
                          document.mozFullScreenElement || 
                          document.msFullscreenElement;
 
     if (isFullscreen) {
-        // Lock to portrait when entering full screen
         if (screen.orientation && screen.orientation.lock) {
-            screen.orientation.lock('portrait').catch(err => {
-                console.warn('Orientation lock failed/unsupported:', err);
-            });
-        } else if (screen.lockOrientation) {
-            screen.lockOrientation('portrait');
-        } else if (screen.mozLockOrientation) {
-            screen.mozLockOrientation('portrait');
-        } else if (screen.msLockOrientation) {
-            screen.msLockOrientation('portrait');
+            try {
+                await screen.orientation.lock('landscape');
+            } catch (error) {
+                console.warn('Orientation lock unsupported:', error);
+            }
         }
     } else {
-        // Unlock orientation to revert to device default when exiting
         if (screen.orientation && screen.orientation.unlock) {
-            screen.orientation.unlock();
-        } else if (screen.unlockOrientation) {
-            screen.unlockOrientation();
-        } else if (screen.mozUnlockOrientation) {
-            screen.mozUnlockOrientation();
-        } else if (screen.msUnlockOrientation) {
-            screen.msUnlockOrientation();
+            try {
+                screen.orientation.unlock();
+            } catch (error) {
+                console.warn('Orientation unlock failed:', error);
+            }
         }
     }
-}
+};
 
-// Attach event listeners for all major browsers
 document.addEventListener('fullscreenchange', handleFullscreenChange);
-document.addEventListener('webkitfullscreenchange', handleFullscreenChange); // iOS/Safari
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 document.addEventListener('mozfullscreenchange', handleFullscreenChange);
 document.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
