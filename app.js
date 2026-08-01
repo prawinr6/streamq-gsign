@@ -116,7 +116,7 @@ const AuthManager = {
         // 2. Initialize Google Token Client
         if (typeof google !== 'undefined' && google.accounts) {
             this.client = google.accounts.oauth2.initTokenClient({
-                client_id: '433396659896-ct041m21obqdseuj1i31h1e5ktjh7n3o.apps.googleusercontent.com', //[cite: 1]
+                client_id: '43906358828-atbm51v3hsd1g52aha9runcpt7g00rdq.apps.googleusercontent.com', //[cite: 1]
                 scope: 'https://www.googleapis.com/auth/youtube.readonly', //[cite: 1]
                 callback: (response) => {
                     if (response.error) {
