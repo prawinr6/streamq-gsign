@@ -6,17 +6,16 @@
     <!-- Block known third-party ad/tracker telemetry network domains while keeping API/CSS functionality -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob:;
-        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://www.youtube.com https://s.ytimg.com https://accounts.google.com;
-        connect-src 'self' https://www.googleapis.com https://www.youtube-nocookie.com https://www.youtube.com https://ipapi.co https://accounts.google.com;
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://www.youtube.com https://s.ytimg.com;
+        connect-src 'self' https://www.googleapis.com https://www.youtube-nocookie.com https://www.youtube.com https://ipapi.co;
         child-src https://www.youtube-nocookie.com https://www.youtube.com;
-        frame-src https://www.youtube-nocookie.com https://www.youtube.com https://accounts.google.com;
+        frame-src https://www.youtube-nocookie.com https://www.youtube.com;
         img-src 'self' data: https: blob:;
         media-src 'self' data: blob: https:;
     ">
     <title>StreamQ</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><path fill='%23ef4444' d='M464 256A208 208 0 1 0 48 256a208 208 0 1 0 416 0zM0 256a256 256 0 1 1 512 0A256 256 0 1 1 0 256zM188.3 147.1c7.6-4.2 16.8-4.1 24.3 .5l144 88c7.1 4.4 11.5 12.1 11.5 20.4s-4.4 16-11.5 20.4l-144 88c-7.4 4.5-16.7 4.7-24.3 .5s-12.3-12.2-12.3-20.9l0-176c0-8.7 4.7-16.7 12.3-20.9z'/></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -78,12 +77,15 @@
                 <input type="text" id="searchInput" placeholder="Search videos or live streams..." class="bg-transparent border-none outline-none text-sm w-full text-white placeholder-gray-500">
             </div>
 
-            <!-- Header Sign In / Sign Out Button -->
-            <button id="authBtn" onclick="AuthManager.isLoggedIn() ? AuthManager.logout() : AuthManager.login()" class="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-700 transition cursor-pointer">
-                <i class="fa-brands fa-google text-white"></i>
-                <span id="authBtnText" class="hidden sm:inline">Sign In</span>
-                <span id="keyStatusBadge" class="w-2 h-2 rounded-full bg-red-500"></span>
-            </button>
+            <!-- API Key Actions -->
+            <div class="flex items-center space-x-3">
+                <button onclick="UI.openModal()" class="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-700 transition">
+                    <i class="fa-solid fa-key text-yellow-400"></i>
+                    <span class="hidden sm:inline">Auth token</span>
+                    <span id="keyStatusBadge" class="w-2 h-2 rounded-full bg-red-500"></span>
+                </button>
+                <div class="w-8 h-8 rounded-full bg-gradient-to-r from-red-500 to-purple-500 border-2 border-transparent hover:border-white cursor-pointer hidden sm:block"></div>
+            </div>
         </header>
 
         <!-- Dynamic Content Area -->
@@ -100,22 +102,6 @@
             <div id="videoGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                 <!-- Video cards injected here -->
             </div>
-        
-        <!-- AUTH MODAL -->
-        <div id="apiKeyModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
-            <div class="bg-[#18181b] border border-gray-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-center">
-                <div class="flex justify-between items-center mb-4">
-                    <div class="flex items-center gap-2">
-                        <i class="fa-brands fa-google text-red-500 text-xl"></i>
-                        <h2 class="text-lg font-bold">Google Authentication</h2>
-                    </div>
-                    <button onclick="UI.closeModal()" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
-                </div>
-                <p class="text-sm text-gray-300 mb-6">You need to sign in with your Google account to view feeds and search videos.</p>
-                <div id="modalMessage" class="hidden text-xs py-2 px-3 rounded-lg mb-4"></div>
-                <button onclick="UI.closeModal(); AuthManager.login();" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-2.5 rounded-lg transition">Sign In with Google</button>
-            </div>
-        </div>
 
             <!-- Video Player View -->
 <div id="playerView" class="hidden flex flex-col lg:flex-row gap-8 max-w-7xl mx-auto w-full">
@@ -175,7 +161,31 @@
         </div>
     </main>
 
-    <script src="app.js"></script>
+    <!-- API KEY SETTINGS MODAL -->
+    <div id="apiKeyModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+        <div class="bg-[#18181b] border border-gray-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
+            <div class="flex justify-between items-center mb-4">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-key text-yellow-400 text-xl"></i>
+                    <h2 class="text-lg font-bold">Auth token settings</h2>
+                </div>
+                <button onclick="UI.closeModal()" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <p class="text-xs text-gray-400 mb-4">Please enter your YouTube Authorization Token here</p>
+            <div class="space-y-4">
+                <div>
+                    <input type="password" id="apiKeyInput" placeholder="AIzaSy..." class="w-full bg-[#0f0f11] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-red-500 transition">
+                </div>
+                <div id="modalMessage" class="hidden text-xs py-2 px-3 rounded-lg"></div>
+                <div class="flex gap-2 pt-2">
+                    <button onclick="KeyManager.saveKeyFromUI()" class="flex-1 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold py-2.5 rounded-lg transition">Save Token</button>
+                    <button onclick="KeyManager.clearKey()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm font-semibold px-4 py-2.5 rounded-lg transition">Clear</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://www.youtube.com/iframe_api"></script>
+    <script src="app.js"></script>
 </body>
 </html>
