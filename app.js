@@ -1,5 +1,6 @@
 const CONFIG = {
     BASE_URL: 'https://www.googleapis.com/youtube/v3',
+    STORAGE_KEY: 'streamq_yt_api_key',
     CACHE_EXPIRY: { 
         TRENDING: 1000 * 60 * 60 * 1, // 1 Hour (Synced with City IP Cycle)
         SEARCH: 1000 * 60 * 60 * 1,   // 1 Hour
@@ -101,83 +102,17 @@ const Formatters = {
     }
 };
 
-// --- OAUTH 2.0 AUTH MANAGER ---
-const AuthManager = {
-    client: null,
-    token: null,
-
-    init() {
-        // 1. Check LocalStorage for existing unexpired token
-        const storedToken = localStorage.getItem('yt_access_token');
-        const expiryTime = localStorage.getItem('yt_token_expiry');
-
-        if (storedToken && expiryTime && Date.now() < parseInt(expiryTime)) {
-            this.token = storedToken;
-        } else {
-            // Clean up if expired or invalid
-            this.clearLocalSession();
-        }
-
-        // 2. Initialize Google Token Client
-        if (typeof google !== 'undefined' && google.accounts) {
-            this.client = google.accounts.oauth2.initTokenClient({
-                client_id: '433396659896-ct041m21obqdseuj1i31h1e5ktjh7n3o.apps.googleusercontent.com', //[cite: 1]
-                scope: 'https://www.googleapis.com/auth/youtube.readonly', //[cite: 1]
-                callback: (response) => {
-                    if (response.error) {
-                        UI.showModalMessage('Authentication failed.', 'error'); //[cite: 1]
-                        return;
-                    }
-                    this.token = response.access_token;
-                    
-                    // Google access tokens typically expire in 3600 seconds (1 hour)
-                    const expiresIn = response.expires_in || 3600; 
-                    localStorage.setItem('yt_access_token', this.token);
-                    localStorage.setItem('yt_token_expiry', Date.now() + (expiresIn * 1000));
-
-                    UI.updateAuthUI(); //[cite: 1]
-                    UI.loadHome(); //[cite: 1]
-                }
-            });
-        }
-    },
-
-    login() {
-        if (!this.client) this.init(); //[cite: 1]
-        // If we already have a valid token in memory/storage, skip requesting a new one
-        if (this.isLoggedIn()) {
-            UI.updateAuthUI();
-            UI.loadHome();
-            return;
-        }
-        if (this.client) this.client.requestAccessToken(); //[cite: 1]
-    },
-
-    logout() {
-        if (this.token && typeof google !== 'undefined' && google.accounts) {
-            google.accounts.oauth2.revoke(this.token, () => {
-                console.log('User logged out and token revoked.'); //[cite: 1]
-            });
-        }
-        this.clearLocalSession();
-        UI.updateAuthUI(); //[cite: 1]
-        UI.loadHome(); //[cite: 1]
-    },
-
-    clearLocalSession() {
-        this.token = null;
-        localStorage.removeItem('yt_access_token');
-        localStorage.removeItem('yt_token_expiry');
-    },
-
-    isLoggedIn() {
-        // Validate token existence and expiry dynamically
-        const expiryTime = localStorage.getItem('yt_token_expiry');
-        if (expiryTime && Date.now() > parseInt(expiryTime)) {
-            this.clearLocalSession();
-            return false;
-        }
-        return !!this.token; //[cite: 1]
+// --- KEY & CACHE MANAGERS ---
+const KeyManager = {
+    getKey: () => localStorage.getItem(CONFIG.STORAGE_KEY) || '',
+    setKey: (key) => { localStorage.setItem(CONFIG.STORAGE_KEY, key.trim()); CacheManager.clearAll(); UI.updateStatusBadge(); },
+    clearKey: () => { localStorage.removeItem(CONFIG.STORAGE_KEY); CacheManager.clearAll(); UI.updateStatusBadge(); UI.showModalMessage('Cleared.', 'info'); document.getElementById('apiKeyInput').value = ''; },
+    saveKeyFromUI: () => {
+        const input = document.getElementById('apiKeyInput').value.trim();
+        if (!input) return UI.showModalMessage('Enter valid key.', 'error');
+        KeyManager.setKey(input);
+        UI.showModalMessage('Saved! Reloading...', 'success');
+        setTimeout(() => { UI.closeModal(); UI.loadHome(); }, 1200);
     }
 };
 
@@ -220,29 +155,13 @@ const LibraryManager = {
 
 // --- YOUTUBE API SERVICE ---
 const YouTubeAPI = {
-    async fetchWithAuth(endpoint) {
-        if (!AuthManager.isLoggedIn()) { 
-            UI.promptForKey('Please sign in with Google to access this feed.'); 
-            return null; 
-        }
-        
-        const url = `${CONFIG.BASE_URL}${endpoint}`;
-        
-        const res = await fetch(url, {
-            headers: {
-                'Authorization': `Bearer ${AuthManager.token}`,
-                'Accept': 'application/json'
-            }
-        });
-        
+    async fetchWithKey(endpoint) {
+        const apiKey = KeyManager.getKey();
+        if (!apiKey) { UI.promptForKey('No authorization token found.'); return null; }
+        const res = await fetch(`${CONFIG.BASE_URL}${endpoint}&key=${apiKey}`);
         const data = await res.json();
-        
         if (!res.ok) {
-            if (res.status === 401 || res.status === 403) {
-                AuthManager.token = null;
-                UI.updateAuthUI();
-                UI.promptForKey(`Session Expired: Please sign in again.`);
-            }
+            if (res.status === 400 || res.status === 403) UI.promptForKey(`API Error: ${data.error?.message}`);
             throw new Error(data.error?.message);
         }
         return data;
@@ -251,40 +170,47 @@ const YouTubeAPI = {
     // Single-batch API enrichment call (Saves API Quota)
     async enrichVideoDetails(items) {
         if (!items || items.length === 0) return [];
-        
-        const videoIds = items
-            .map(item => (typeof item.id === 'object' ? item.id?.videoId : item.id))
-            .filter(Boolean)
-            .join(',');
-
-        if (!videoIds) return items;
+        const videoIds = items.map(item => typeof item.id === 'object' ? item.id.videoId : item.id).filter(Boolean);
+        if (videoIds.length === 0) return items;
 
         try {
-            const statsData = await this.fetchWithAuth(`/videos?part=snippet,statistics&id=${videoIds}`);
-            if (statsData && statsData.items) {
-                return statsData.items;
+            const data = await this.fetchWithKey(`/videos?part=snippet,statistics&id=${videoIds.join(',')}`);
+            if (data && data.items) {
+                const detailsMap = new Map(data.items.map(v => [v.id, v]));
+                return items.map(item => {
+                    const id = typeof item.id === 'object' ? item.id.videoId : item.id;
+                    const fullDetails = detailsMap.get(id);
+                    return {
+                        id: id,
+                        snippet: fullDetails?.snippet || item.snippet,
+                        statistics: fullDetails?.statistics || {}
+                    };
+                });
             }
-        } catch (error) {
-            console.error("Error enriching video details:", error);
+        } catch (e) {
+            console.error('Error enriching video stats:', e);
         }
         return items;
     },
 
     async search(query, isLive = false, regionCode = 'IN') {
         if (!query) return [];
-        let endpoint = `/search?part=snippet&q=${encodeURIComponent(query)}&type=video&safeSearch=moderate&regionCode=${regionCode}&maxResults=24`;
-        if (isLive) endpoint += '&eventType=live';
+        const cacheKey = `yt_search_${query.replace(/\s+/g, '').toLowerCase()}_${isLive}_${regionCode}_v3`;
+        const cached = CacheManager.get(cacheKey);
+        if (cached) return cached;
 
         try {
-            const data = await this.fetchWithAuth(endpoint);
+            let endpoint = `/search?part=snippet&q=${encodeURIComponent(query)}&type=video&safeSearch=moderate&regionCode=${regionCode}&maxResults=24`;
+            if (isLive) endpoint += '&eventType=live';
+
+            const data = await this.fetchWithKey(endpoint);
             if (data && data.items) {
-                return await this.enrichVideoDetails(data.items);
+                const enrichedItems = await this.enrichVideoDetails(data.items);
+                CacheManager.set(cacheKey, enrichedItems, CONFIG.CACHE_EXPIRY.SEARCH);
+                return enrichedItems;
             }
             return [];
-        } catch (error) { 
-            console.error("Search API error:", error);
-            return []; 
-        }
+        } catch (error) { return []; }
     }
 };
 
@@ -301,47 +227,17 @@ const UI = {
     modal: document.getElementById('apiKeyModal'),
     modalMsg: document.getElementById('modalMessage'),
     statusBadge: document.getElementById('keyStatusBadge'),
-    authBtnText: document.getElementById('authBtnText'),
 
-    updateAuthUI() { 
-        const isLoggedIn = AuthManager.isLoggedIn();
-        if (this.statusBadge) {
-            this.statusBadge.className = `w-2 h-2 rounded-full ${isLoggedIn ? 'bg-green-500' : 'bg-red-500'}`; 
-        }
-        if (this.authBtnText) {
-            this.authBtnText.textContent = isLoggedIn ? 'Sign Out' : 'Sign In';
-        }
-    },
-
-    openModal() { 
-        if (this.modalMsg) this.modalMsg.classList.add('hidden'); 
-        if (this.modal) {
-            this.modal.classList.remove('hidden'); 
-            this.modal.classList.add('flex'); 
-        }
-    },
-    closeModal() { 
-        if (this.modal) {
-            this.modal.classList.add('hidden'); 
-            this.modal.classList.remove('flex'); 
-        }
-    },
+    updateStatusBadge() { this.statusBadge.className = `w-2 h-2 rounded-full ${KeyManager.getKey() ? 'bg-green-500' : 'bg-red-500'}`; },
+    openModal() { document.getElementById('apiKeyInput').value = KeyManager.getKey(); this.modalMsg.classList.add('hidden'); this.modal.classList.remove('hidden'); this.modal.classList.add('flex'); },
+    closeModal() { this.modal.classList.add('hidden'); this.modal.classList.remove('flex'); },
     showModalMessage(msg, type) {
-        if (!this.modalMsg) return;
         this.modalMsg.textContent = msg;
         this.modalMsg.className = `text-xs py-2 px-3 rounded-lg mt-2 ${type === 'error' ? 'bg-red-900/50 text-red-300' : type === 'success' ? 'bg-green-900/50 text-green-300' : 'bg-blue-900/50 text-blue-300'}`;
     },
-    promptForKey(reason) { 
-        this.showLoader(false); 
-        this.openModal(); 
-        this.showModalMessage(reason, 'error'); 
-    },
+    promptForKey(reason) { this.showLoader(false); this.openModal(); this.showModalMessage(reason, 'error'); },
 
-    showLoader(show) { 
-        if (this.loader) this.loader.classList.toggle('hidden', !show); 
-        if (show && this.grid) this.grid.innerHTML = ''; 
-    },
-    
+    showLoader(show) { this.loader.classList.toggle('hidden', !show); if (show) this.grid.innerHTML = ''; },
     setActiveMenu(id) {
         document.querySelectorAll('.nav-link').forEach(el => {
             el.classList.remove('bg-gray-800', 'text-red-500');
@@ -416,9 +312,9 @@ const UI = {
     async loadNewslive() {
         this.currentActiveFeed = 'newslive';
         this.setActiveMenu('nav-newslive');
-        this.resetView(`<span class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></span> Latest news live</span>`);
+        this.resetView(`<span class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></span> Latest news </span>`);
         
-        const videos = await YouTubeAPI.search(`Latest tamil news live today`, true);
+        const videos = await YouTubeAPI.search(`Latest tamil news live today`);
         this.renderGrid(videos);
     },
 
@@ -428,14 +324,12 @@ const UI = {
         this.resetView('Watch History');
         this.renderGrid(LibraryManager.getHistory(), true);
     },
-
     loadSaved() {
         this.currentActiveFeed = 'saved';
         this.setActiveMenu('nav-saved');
         this.resetView('Saved to Library');
         this.renderGrid(LibraryManager.getSaved(), true);
     },
-
     async handleSearch(query) {
         this.currentActiveFeed = 'search';
         this.setActiveMenu('');
@@ -498,54 +392,6 @@ const UI = {
         });
     },
 
-    // --- PLAYER & HANDLER METHODS ---
-    updateSaveButtonUI(isSaved) {
-        const saveBtn = document.getElementById('saveBtn');
-        if (!saveBtn) return;
-        if (isSaved) {
-            saveBtn.innerHTML = `<i class="fa-solid fa-bookmark text-red-500"></i> <span>Saved</span>`;
-            saveBtn.classList.add('border-red-500');
-        } else {
-            saveBtn.innerHTML = `<i class="fa-regular fa-bookmark"></i> <span>Save</span>`;
-            saveBtn.classList.remove('border-red-500');
-        }
-    },
-
-    toggleSaveCurrentVideo() {
-        if (!this.currentVideoObj) return;
-        const isSaved = LibraryManager.toggleSaved(this.currentVideoObj);
-        this.updateSaveButtonUI(isSaved);
-    },
-
-    closePlayer() {
-        if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
-            ytPlayer.stopVideo();
-        }
-        this.playerView.classList.add('hidden');
-        const nowPlayingMenu = document.getElementById('nav-now-playing-container');
-        if (nowPlayingMenu) nowPlayingMenu.classList.add('hidden');
-        this.grid.classList.remove('hidden');
-        this.title.classList.remove('hidden');
-    },
-
-    minimisePlayer() {
-        this.playerView.classList.add('hidden');
-        this.grid.classList.remove('hidden');
-        this.title.classList.remove('hidden');
-    },
-
-    showNowPlaying() {
-        if (!this.currentVideoObj) return;
-        this.grid.classList.add('hidden');
-        this.title.classList.add('hidden');
-        this.playerView.classList.remove('hidden');
-        this.setActiveMenu('nav-now-playing');
-    },
-
-    onPlayerStateChange(event) {
-        // Player state change handler (e.g. YT.PlayerState.ENDED)
-    },
-
     openPlayer(videoObj) {
         const bgAudio = document.getElementById('bgAudio');
         if (bgAudio) {
@@ -568,19 +414,11 @@ const UI = {
         LibraryManager.saveToHistory(this.currentVideoObj);
         this.updateSaveButtonUI(LibraryManager.isSaved(videoId));
 
-        // Update Text & Statistics DOM
-        document.getElementById('videoTitle').textContent = snippet.title || 'Untitled';
-        document.getElementById('videoChannel').textContent = snippet.channelTitle || 'Unknown Channel';
-        document.getElementById('videoViews').textContent = Formatters.views(stats.viewCount);
-        document.getElementById('videoDate').textContent = Formatters.date(snippet.publishedAt);
-        document.getElementById('videoLikes').textContent = Formatters.likes(stats.likeCount);
-
         const currentOrigin = (window.location.hostname === '' || window.location.hostname === 'localhost') ? 'https://localhost' : window.location.origin;
 
-        // Initialize or load YouTube Player
-        if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
+        if (ytPlayer) {
             ytPlayer.loadVideoById(videoId);
-        } else if (typeof YT !== 'undefined' && YT.Player) {
+        } else {
             ytPlayer = new YT.Player('videoPlayer', {
                 host: 'https://www.youtube-nocookie.com',
                 videoId: videoId,
@@ -597,38 +435,123 @@ const UI = {
                     'onStateChange': this.onPlayerStateChange
                 }
             });
-        } else {
-            // Fallback IFrame in case YouTube API JS isn't initialized yet
-            const playerContainer = document.getElementById('videoPlayer');
-            if (playerContainer) {
-                playerContainer.innerHTML = `<iframe class="w-full h-full" src="https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&enablejsapi=1&origin=${encodeURIComponent(currentOrigin)}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>`;
-            }
         }
+
+        document.getElementById('videoTitle').textContent = snippet.title || 'Untitled';
+        document.getElementById('videoChannel').textContent = snippet.channelTitle || 'Unknown Channel';
+        document.getElementById('videoViews').textContent = Formatters.views(stats.viewCount);
+        document.getElementById('videoDate').textContent = Formatters.date(snippet.publishedAt);
+        document.getElementById('videoLikes').textContent = Formatters.likes(stats.likeCount);
 
         document.getElementById('contentArea').scrollTo({ top: 0, behavior: 'smooth' });
+
+        this.setupMediaSession(snippet);
+    },
+
+    setupMediaSession(snippet) {
+        if (!('mediaSession' in navigator)) return;
+
+        navigator.mediaSession.metadata = new MediaMetadata({
+            title: snippet.title || 'Untitled',
+            artist: snippet.channelTitle || 'Unknown Channel',
+            artwork: [
+                {
+                    src: snippet.thumbnails?.high?.url || snippet.thumbnails?.default?.url || 'https://via.placeholder.com/640x360.png',
+                    sizes: '480x360',
+                    type: 'image/jpeg'
+                }
+            ]
+        });
+
+        navigator.mediaSession.setActionHandler('play', async () => {
+            const bgAudio = document.getElementById('bgAudio');
+            if (bgAudio) await bgAudio.play().catch(() => {});
+            if (ytPlayer && ytPlayer.playVideo) ytPlayer.playVideo();
+        });
+
+        navigator.mediaSession.setActionHandler('pause', () => {
+            if (ytPlayer && ytPlayer.pauseVideo) ytPlayer.pauseVideo();
+            const bgAudio = document.getElementById('bgAudio');
+            if (bgAudio) bgAudio.pause();
+        });
+
+        navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+            if (ytPlayer && ytPlayer.getCurrentTime) {
+                const skipTime = details.seekOffset || 10;
+                ytPlayer.seekTo(Math.max(ytPlayer.getCurrentTime() - skipTime, 0), true);
+            }
+        });
+
+        navigator.mediaSession.setActionHandler('seekforward', (details) => {
+            if (ytPlayer && ytPlayer.getCurrentTime) {
+                const skipTime = details.seekOffset || 10;
+                ytPlayer.seekTo(ytPlayer.getCurrentTime() + skipTime, true);
+            }
+        });
+    },
+
+    onPlayerStateChange(event) {
+        const bgAudio = document.getElementById('bgAudio');
+        if (event.data === 1) {
+            if (bgAudio && bgAudio.paused) bgAudio.play().catch(() => {});
+            if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+        } else if (event.data === 2 || event.data === 0) {
+            if (bgAudio) bgAudio.pause();
+            if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+        }
+    },
+
+    showNowPlaying() {
+        if (!this.currentVideoObj) return;
+        this.setActiveMenu('nav-now-playing');
+        this.grid.classList.add('hidden');
+        this.title.classList.add('hidden');
+        this.playerView.classList.remove('hidden');
+    },
+
+    minimisePlayer() {
+        this.playerView.classList.add('hidden');
+        this.grid.classList.remove('hidden');
+        this.title.classList.remove('hidden');
+        
+        const nowPlayingMenu = document.getElementById('nav-now-playing-container');
+        if (nowPlayingMenu) nowPlayingMenu.classList.remove('hidden');
+    },
+
+    closePlayer() {
+        if (ytPlayer && ytPlayer.stopVideo) ytPlayer.stopVideo();
+
+        const bgAudio = document.getElementById('bgAudio');
+        if (bgAudio) bgAudio.pause();
+
+        this.playerView.classList.add('hidden');
+        this.grid.classList.remove('hidden');
+        this.title.classList.remove('hidden');
+        this.currentVideoObj = null;
+
+        const nowPlayingMenu = document.getElementById('nav-now-playing-container');
+        if (nowPlayingMenu) nowPlayingMenu.classList.add('hidden');
+
+        if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
+    },
+
+    toggleSaveCurrentVideo() {
+        if (!this.currentVideoObj) return;
+        const isNowSaved = LibraryManager.toggleSaved(this.currentVideoObj);
+        this.updateSaveButtonUI(isNowSaved);
+    },
+
+    updateSaveButtonUI(isSaved) {
+        const btn = document.getElementById('saveBtn');
+        if (isSaved) {
+            btn.innerHTML = `<i class="fa-solid fa-bookmark text-red-500"></i> <span class="text-red-500">Saved</span>`;
+            btn.classList.add('border-red-500');
+        } else {
+            btn.innerHTML = `<i class="fa-regular fa-bookmark"></i> <span>Save</span>`;
+            btn.classList.remove('border-red-500');
+        }
     }
 };
-
-// --- SEARCH & INPUT LISTENERS ---
-let searchTimeout;
-if (UI.searchInput) {
-    UI.searchInput.addEventListener('input', (e) => {
-        clearTimeout(searchTimeout);
-        const query = e.target.value.trim();
-        searchTimeout = setTimeout(() => {
-            if (query.length > 2) UI.handleSearch(query);
-            else if (query.length === 0) UI.loadHome();
-        }, 800);
-    });
-
-    UI.searchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            clearTimeout(searchTimeout);
-            const query = e.target.value.trim();
-            if (query.length > 0) UI.handleSearch(query);
-        }
-    });
-}
 
 // --- VISIBILITY & BACKGROUND RESUMPTION ---
 document.addEventListener('visibilitychange', () => {
@@ -676,10 +599,23 @@ document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 document.addEventListener('mozfullscreenchange', handleFullscreenChange);
 document.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
+let searchTimeout;
+UI.searchInput.addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    const query = e.target.value.trim();
+    searchTimeout = setTimeout(() => {
+        if (query.length > 2) UI.handleSearch(query);
+        else if (query.length === 0) UI.loadHome();
+    }, 800);
+});
+
 // INITIALIZATION
 document.addEventListener('DOMContentLoaded', () => {
-    AuthManager.init();
-    UI.updateAuthUI();
+    UI.updateStatusBadge();
+    
+    // Start hourly IP check interval
     GeoService.startHourlyIPCheck();
-    UI.loadHome();
+
+    if (!KeyManager.getKey()) UI.openModal();
+    else UI.loadHome();
 });
