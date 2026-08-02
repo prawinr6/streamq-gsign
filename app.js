@@ -1,10 +1,12 @@
 const CONFIG = {
     BASE_URL: 'https://www.googleapis.com/youtube/v3',
     CACHE_EXPIRY: { 
-        TRENDING: 1000 * 60 * 60 * 1, // 1 Hour
-        SEARCH: 1000 * 60 * 60 * 1,   // 1 Hour
-        LOCATION: 1000 * 60 * 60 * 1  // 1 Hour IP Lookup
-    }
+        TRENDING: 1000 * 60 * 60 * 1,  // 1 Hour
+        SEARCH: 1000 * 60 * 60 * 1,    // 1 Hour
+        LOCATION: 1000 * 60 * 60 * 1,  // 1 Hour IP Lookup
+        VIDEO_STATS: 1000 * 60 * 60 * 24 // 24 Hours for individual video stats
+    },
+    TOKEN_EXPIRY_BUFFER: 1000 * 60 * 5  // 5 Minute buffer before actual expiry
 };
 
 // Global YouTube Player instance reference
@@ -48,12 +50,16 @@ const GeoService = {
     startHourlyIPCheck() {
         setInterval(async () => {
             const oldLocation = CacheManager.get('yt_user_location_info');
+            // Force IP refresh
             const newLocation = await this.getUserLocation(true);
             
             if (!oldLocation || oldLocation.city !== newLocation.city) {
                 console.log(`IP Location updated to: ${newLocation.city}. Auto-refreshing feeds...`);
-                UI.refreshCurrentFeed();
+            } else {
+                console.log('Hourly IP check completed. Triggering scheduled feed refresh...');
             }
+            // Pass forceRefresh = true to bypass optimistic API caching every 1 hour
+            UI.refreshCurrentFeed(true);
         }, 1000 * 60 * 60);
     }
 };
@@ -102,61 +108,57 @@ const AuthManager = {
     token: null,
 
     init() {
-        // 1. Check LocalStorage for existing unexpired token
         const storedToken = localStorage.getItem('yt_access_token');
         const expiryTime = localStorage.getItem('yt_token_expiry');
 
-        if (storedToken && expiryTime && Date.now() < parseInt(expiryTime)) {
+        // Check stored token using safety expiry buffer
+        if (storedToken && expiryTime && (Date.now() + CONFIG.TOKEN_EXPIRY_BUFFER) < parseInt(expiryTime, 10)) {
             this.token = storedToken;
         } else {
-            // Clean up if expired or invalid
             this.clearLocalSession();
         }
 
-        // 2. Initialize Google Token Client
         if (typeof google !== 'undefined' && google.accounts) {
             this.client = google.accounts.oauth2.initTokenClient({
-                client_id: '43906358828-atbm51v3hsd1g52aha9runcpt7g00rdq.apps.googleusercontent.com', //[cite: 1]
-                scope: 'https://www.googleapis.com/auth/youtube.readonly', //[cite: 1]
+                client_id: '43906358828-atbm51v3hsd1g52aha9runcpt7g00rdq.apps.googleusercontent.com',
+                scope: 'https://www.googleapis.com/auth/youtube.readonly',
                 callback: (response) => {
                     if (response.error) {
-                        UI.showModalMessage('Authentication failed.', 'error'); //[cite: 1]
+                        UI.showModalMessage('Authentication failed.', 'error');
                         return;
                     }
                     this.token = response.access_token;
                     
-                    // Google access tokens typically expire in 3600 seconds (1 hour)
                     const expiresIn = response.expires_in || 3600; 
                     localStorage.setItem('yt_access_token', this.token);
                     localStorage.setItem('yt_token_expiry', Date.now() + (expiresIn * 1000));
 
-                    UI.updateAuthUI(); //[cite: 1]
-                    UI.loadHome(); //[cite: 1]
+                    UI.updateAuthUI();
+                    UI.loadHome();
                 }
             });
         }
     },
 
     login() {
-        if (!this.client) this.init(); //[cite: 1]
-        // If we already have a valid token in memory/storage, skip requesting a new one
+        if (!this.client) this.init();
         if (this.isLoggedIn()) {
             UI.updateAuthUI();
             UI.loadHome();
             return;
         }
-        if (this.client) this.client.requestAccessToken(); //[cite: 1]
+        if (this.client) this.client.requestAccessToken();
     },
 
     logout() {
         if (this.token && typeof google !== 'undefined' && google.accounts) {
             google.accounts.oauth2.revoke(this.token, () => {
-                console.log('User logged out and token revoked.'); //[cite: 1]
+                console.log('User logged out and token revoked.');
             });
         }
         this.clearLocalSession();
-        UI.updateAuthUI(); //[cite: 1]
-        UI.loadHome(); //[cite: 1]
+        UI.updateAuthUI();
+        UI.loadHome();
     },
 
     clearLocalSession() {
@@ -166,13 +168,13 @@ const AuthManager = {
     },
 
     isLoggedIn() {
-        // Validate token existence and expiry dynamically
         const expiryTime = localStorage.getItem('yt_token_expiry');
-        if (expiryTime && Date.now() > parseInt(expiryTime)) {
+        // Validate token dynamically with a 5-minute safety buffer window
+        if (expiryTime && (Date.now() + CONFIG.TOKEN_EXPIRY_BUFFER) > parseInt(expiryTime, 10)) {
             this.clearLocalSession();
             return false;
         }
-        return !!this.token; //[cite: 1]
+        return !!this.token;
     }
 };
 
@@ -184,9 +186,14 @@ const CacheManager = {
         if (!itemStr) return null;
         try {
             const item = JSON.parse(itemStr);
-            if (Date.now() > item.expiry) { localStorage.removeItem(key); return null; }
+            if (Date.now() > item.expiry) { 
+                localStorage.removeItem(key); 
+                return null; 
+            }
             return item.data;
-        } catch { return null; }
+        } catch { 
+            return null; 
+        }
     },
     clearAll: () => Object.keys(localStorage).forEach(k => { if (k.startsWith('yt_')) localStorage.removeItem(k); })
 };
@@ -233,7 +240,7 @@ const YouTubeAPI = {
         
         if (!res.ok) {
             if (res.status === 401 || res.status === 403) {
-                AuthManager.token = null;
+                AuthManager.clearLocalSession();
                 UI.updateAuthUI();
                 UI.promptForKey(`Session Expired: Please sign in again.`);
             }
@@ -242,36 +249,73 @@ const YouTubeAPI = {
         return data;
     },
 
-    async enrichVideoDetails(items) {
+    async enrichVideoDetails(items, forceRefresh = false) {
         if (!items || items.length === 0) return [];
         
-        const videoIds = items
-            .map(item => (typeof item.id === 'object' ? item.id?.videoId : item.id))
-            .filter(Boolean)
-            .join(',');
+        const uncachedIds = [];
+        const resultMap = {};
 
-        if (!videoIds) return items;
-
-        try {
-            const statsData = await this.fetchWithAuth(`/videos?part=snippet,statistics&id=${videoIds}`);
-            if (statsData && statsData.items) {
-                return statsData.items;
+        // Deduplicate and check cache per video ID
+        items.forEach(item => {
+            const id = typeof item.id === 'object' ? item.id?.videoId : item.id;
+            if (!id) return;
+            const cacheKey = `yt_vid_${id}`;
+            const cachedStats = !forceRefresh ? CacheManager.get(cacheKey) : null;
+            
+            if (cachedStats) {
+                resultMap[id] = cachedStats;
+            } else {
+                uncachedIds.push(id);
             }
-        } catch (error) {
-            console.error("Error enriching video details:", error);
+        });
+
+        if (uncachedIds.length > 0) {
+            try {
+                // Optimized fields selection to trim payload size
+                const fieldsParam = encodeURIComponent('items(id,snippet(title,publishedAt,thumbnails,channelTitle,liveBroadcastContent),statistics(viewCount,likeCount))');
+                const statsData = await this.fetchWithAuth(`/videos?part=snippet,statistics&id=${uncachedIds.join(',')}&fields=${fieldsParam}`);
+                
+                if (statsData && statsData.items) {
+                    statsData.items.forEach(video => {
+                        resultMap[video.id] = video;
+                        CacheManager.set(`yt_vid_${video.id}`, video, CONFIG.CACHE_EXPIRY.VIDEO_STATS);
+                    });
+                }
+            } catch (error) {
+                console.error("Error enriching video details:", error);
+            }
         }
-        return items;
+
+        return items.map(item => {
+            const id = typeof item.id === 'object' ? item.id?.videoId : item.id;
+            return resultMap[id] || item;
+        });
     },
 
-    async search(query, isLive = false, regionCode = 'IN') {
+    async search(query, isLive = false, regionCode = 'IN', forceRefresh = false) {
         if (!query) return [];
-        let endpoint = `/search?part=snippet&q=${encodeURIComponent(query)}&type=video&safeSearch=moderate&regionCode=${regionCode}&maxResults=24`;
+
+        const cacheKey = `yt_feed_${encodeURIComponent(query)}_${isLive}_${regionCode}`;
+        
+        // Return optimistic cache if available and not forcing refresh
+        if (!forceRefresh) {
+            const cachedFeed = CacheManager.get(cacheKey);
+            if (cachedFeed) {
+                return cachedFeed;
+            }
+        }
+
+        // Optimized fields parameter reducing token processing and bandwidth
+        const fieldsParam = encodeURIComponent('items(id,snippet(title,publishedAt,thumbnails,channelTitle,liveBroadcastContent))');
+        let endpoint = `/search?part=snippet&q=${encodeURIComponent(query)}&type=video&safeSearch=moderate&regionCode=${regionCode}&maxResults=24&fields=${fieldsParam}`;
         if (isLive) endpoint += '&eventType=live';
 
         try {
             const data = await this.fetchWithAuth(endpoint);
             if (data && data.items) {
-                return await this.enrichVideoDetails(data.items);
+                const enrichedItems = await this.enrichVideoDetails(data.items, forceRefresh);
+                CacheManager.set(cacheKey, enrichedItems, CONFIG.CACHE_EXPIRY.SEARCH);
+                return enrichedItems;
             }
             return [];
         } catch (error) { 
@@ -352,63 +396,62 @@ const UI = {
         }
     },
 
-    refreshCurrentFeed() {
+    refreshCurrentFeed(forceRefresh = false) {
         switch (this.currentActiveFeed) {
-            case 'home': this.loadHome(); break;
-            case 'trending': this.loadTrending(); break;
-            case 'music': this.loadMusic(); break;
-            case 'explore': this.loadExplore(); break;
-            case 'newslive': this.loadNewslive(); break;
+            case 'home': this.loadHome(forceRefresh); break;
+            case 'trending': this.loadTrending(forceRefresh); break;
+            case 'music': this.loadMusic(forceRefresh); break;
+            case 'explore': this.loadExplore(forceRefresh); break;
+            case 'newslive': this.loadNewslive(forceRefresh); break;
             default: break;
         }
     },
 
-    async loadHome() {
+    async loadHome(forceRefresh = false) {
         this.currentActiveFeed = 'home';
         this.setActiveMenu('nav-home');
-        const loc = await GeoService.getUserLocation();
+        const loc = await GeoService.getUserLocation(forceRefresh);
         this.resetView(`Recommended For You <span class="text-sm font-normal text-gray-500 ml-2">(${loc.city}, ${loc.name})</span>`);
         
-        // Custom search query targeting user's specific city
-        const videos = await YouTubeAPI.search(`${loc.city} top trending videos`, false, loc.code);
+        const videos = await YouTubeAPI.search(`${loc.city} top trending videos`, false, loc.code, forceRefresh);
         this.renderGrid(videos);
     },
 
-    async loadTrending() {
+    async loadTrending(forceRefresh = false) {
         this.currentActiveFeed = 'trending';
         this.setActiveMenu('nav-trending');
-        const loc = await GeoService.getUserLocation();
+        const loc = await GeoService.getUserLocation(forceRefresh);
         this.resetView(`Trending in ${loc.city}`);
         
-        const videos = await YouTubeAPI.search(`Trending today in ${loc.city}`, false, loc.code);
+        const videos = await YouTubeAPI.search(`Trending today in ${loc.city}`, false, loc.code, forceRefresh);
         this.renderGrid(videos);
     },
 
-    async loadMusic() {
+    async loadMusic(forceRefresh = false) {
         this.currentActiveFeed = 'music';
         this.setActiveMenu('nav-music');
         this.resetView(`Trending Music`);
         
-        const videos = await YouTubeAPI.search('Trending tamil music video songs this week');
+        const videos = await YouTubeAPI.search('Trending tamil music video songs this week', false, 'IN', forceRefresh);
         this.renderGrid(videos);
     },
 
-    async loadExplore() {
+    async loadExplore(forceRefresh = false) {
         this.currentActiveFeed = 'explore';
         this.setActiveMenu('nav-explore');
-        const loc = await GeoService.getUserLocation();
+        const loc = await GeoService.getUserLocation(forceRefresh);
         this.resetView(`Explore ${loc.city}`);
         
-        const videos = await YouTubeAPI.search(`Explore ${loc.city} travel culture news technology`, false, loc.code);
+        const videos = await YouTubeAPI.search(`Explore ${loc.city} travel culture news technology`, false, loc.code, forceRefresh);
         this.renderGrid(videos);
     },
 
-    async loadNewslive() {
+    async loadNewslive(forceRefresh = false) {
         this.currentActiveFeed = 'newslive';
         this.setActiveMenu('nav-newslive');
         this.resetView(`<span class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></span> Latest news live</span>`);
         
-        const videos = await YouTubeAPI.search(`Latest tamil news live today`, true);
+        const videos = await YouTubeAPI.search(`Latest tamil news live today`, true, 'IN', forceRefresh);
         this.renderGrid(videos);
     },
 
@@ -533,7 +576,7 @@ const UI = {
     },
 
     onPlayerStateChange(event) {
-        // Player state change handler (e.g. YT.PlayerState.ENDED)
+        // Player state change handler
     },
 
     openPlayer(videoObj) {
