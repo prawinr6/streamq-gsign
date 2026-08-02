@@ -120,7 +120,7 @@ const AuthManager = {
 
         if (typeof google !== 'undefined' && google.accounts) {
             this.client = google.accounts.oauth2.initTokenClient({
-                client_id: '43906358828-atbm51v3hsd1g52aha9runcpt7g00rdq.apps.googleusercontent.com',
+                client_id: '733824266701-c6a4h7rg130rctcb2vg6sett410irhbc.apps.googleusercontent.com',
                 scope: 'https://www.googleapis.com/auth/youtube.readonly',
                 callback: (response) => {
                     if (response.error) {
